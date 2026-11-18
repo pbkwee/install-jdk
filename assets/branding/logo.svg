@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">install-jdk logo</title>
+  <desc id="description">A terminal window with a command prompt and a green download arrow.</desc>
+  <g fill="none" stroke="#996444" stroke-width="20">
+    <rect x="48" y="102" width="416" height="308" rx="29" />
+    <path d="M52 170H460" />
+  </g>
+  <circle cx="88" cy="136" r="9" fill="#88AA00" />
+  <circle cx="120" cy="136" r="9" fill="#88AA00" />
+  <circle cx="152" cy="136" r="9" fill="#88AA00" />
+  <path d="M108 240L147 279L108 318M178 318H231" fill="none" stroke="#996444" stroke-width="21" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M349 222V306M316 273L349 306L382 273M301 347H397" fill="none" stroke="#587200" stroke-width="21" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

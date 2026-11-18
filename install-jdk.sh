@@ -46,7 +46,7 @@ set -o pipefail
 # WGET_OPTS=(--tries=2 --timeout=10 --quiet --header="User-Agent: banana")
 
 DEFAULT_JDK_VERSION=27
-INSTALL_JDK_VERSION=${INSTALL_JDK_VERSION:-$DEFAULT_JDK_VERSION}
+INSTALL_JDK_VERSION=${INSTALL_JDK_VERSION-}
 INSTALL_JDK_MODE=${INSTALL_JDK_MODE:-auto}
 INSTALL_JDK_ACTIVATE=${INSTALL_JDK_ACTIVATE:-auto}
 INSTALL_JDK_TARGET=${INSTALL_JDK_TARGET-}
@@ -188,13 +188,13 @@ function print_usage() {
   cat <<EOUSAGE
 Usage: $0 [options]
 
-  --jdk-version MAJOR              JDK 8, 11, 17, 21, 25, or 27 (default: $DEFAULT_JDK_VERSION)
+  --jdk-version MAJOR              JDK 8, 11, 17, 21, 25, or 27 (default: $DEFAULT_JDK_VERSION, or 11 on 32-bit x86 Linux)
   --early-access                   Allow an OpenJDK preview, such as Java 28
   --install-mode MODE              auto, package, or archive (default: auto)
   --activate MODE                  How the installed JDK becomes the Java you use
   --install-target PATH            Archive directory (default here: $target)
   --profile-shell SHELL            auto, bash, or zsh for --activate user-profile
-  --architecture ARCH              x64, aarch64, or x86 for an explicit archive
+  --architecture ARCH              x64, aarch64, or x86 (32-bit Linux)
   --download-url URL               Override the JDK archive download
   --checksum-url URL               Override the archive SHA-256 URL
   --verify-checksum BOOL           Verify the archive's SHA-256 (default: true)
@@ -216,6 +216,7 @@ Install modes:
   package         Use APT on Debian 12+ or Ubuntu 22+, or DNF/YUM on
                   AlmaLinux/Rocky/RHEL 8+ or CentOS Stream 9+.
   archive         Use a vendor archive. Rerun this installer for updates.
+                  Automatic Linux x86 (32-bit) downloads use Corretto 11.
 
 Activation modes:
   auto            Keep the distro's alternatives policy for packages.
@@ -347,7 +348,14 @@ function output_platform() {
 
 function output_host_architecture() {
   case "$(uname -m)" in
-    x86_64|amd64) echo x64 ;;
+    x86_64|amd64)
+      # An x86-64 kernel can run a 32-bit Linux userspace.
+      if [ "$PLATFORM" = linux ] && [ "$(getconf LONG_BIT 2>/dev/null)" = 32 ]; then
+        echo x86
+      else
+        echo x64
+      fi
+    ;;
     arm64|aarch64) echo aarch64 ;;
     i386|i486|i586|i686) echo x86 ;;
     *) return 1 ;;
@@ -453,7 +461,7 @@ No download or installation was started. Review the listed lines, or rerun with 
 }
 
 function apply_defaults_and_validate() {
-  local name
+  local name host_architecture
   for name in INSTALL_JDK_PROMPT INSTALL_JDK_FORCE_INSTALL INSTALL_JDK_PERMIT_OBSOLETE \
     INSTALL_JDK_VERIFY_CHECKSUM INSTALL_JDK_RUN_POST_INSTALL_TESTS INSTALL_JDK_DRY_RUN INSTALL_JDK_QUIET; do
     normalize_boolean_variable "$name" || return 1
@@ -466,6 +474,28 @@ function apply_defaults_and_validate() {
     auto|bash|zsh) ;;
     *) ERRORMSG="INSTALL_JDK_PROFILE_SHELL must be auto, bash, or zsh"; return 1 ;;
   esac
+
+  PLATFORM=$(output_platform) || {
+    ERRORMSG="Only Linux and macOS are currently supported"
+    return 1
+  }
+  host_architecture=$(output_host_architecture) || host_architecture=
+  PLATFORMARCH=${INSTALL_JDK_ARCHITECTURE:-$host_architecture}
+  case "$PLATFORMARCH" in
+    x64|aarch64|x86) ;;
+    '') ERRORMSG="Could not determine the host architecture; use --architecture"; return 1 ;;
+    *) ERRORMSG="INSTALL_JDK_ARCHITECTURE must be x64, aarch64, or x86"; return 1 ;;
+  esac
+  if [ "$PLATFORMARCH" = x86 ] && { [ "$PLATFORM" != linux ] || [ "$host_architecture" != x86 ]; }; then
+    ERRORMSG="The x86 JDK requires a 32-bit x86 Linux userspace."
+    return 1
+  fi
+  if [ "$PLATFORM" = linux ] && [ "$host_architecture" = x86 ] && [ "$PLATFORMARCH" != x86 ]; then
+    ERRORMSG="This 32-bit x86 Linux userspace requires a 32-bit JDK."
+    return 1
+  fi
+  if [ "$PLATFORMARCH" = x86 ]; then DEFAULT_JDK_VERSION=11; fi
+  INSTALL_JDK_VERSION=${INSTALL_JDK_VERSION:-$DEFAULT_JDK_VERSION}
 
   case "$INSTALL_JDK_VERSION" in
     ''|*[!0-9]*) ERRORMSG="INSTALL_JDK_VERSION must be a Java major version"; return 1 ;;
@@ -480,21 +510,15 @@ function apply_defaults_and_validate() {
     return 1
   fi
 
-  PLATFORM=$(output_platform) || {
-    ERRORMSG="Only Linux and macOS are currently supported"
-    return 1
-  }
-  PLATFORMARCH=${INSTALL_JDK_ARCHITECTURE:-$(output_host_architecture)} || {
-    ERRORMSG="Could not determine the host architecture; use --architecture"
-    return 1
-  }
-  case "$PLATFORMARCH" in
-    x64|aarch64|x86) ;;
-    *) ERRORMSG="INSTALL_JDK_ARCHITECTURE must be x64, aarch64, or x86"; return 1 ;;
-  esac
-  if [ "$PLATFORMARCH" = x86 ] && [ -z "$INSTALL_JDK_DOWNLOAD_URL" ]; then
-    ERRORMSG="No automatic 32-bit x86 source. Supply a compatible vendor archive with --download-url."
-    return 1
+  if [ "$PLATFORMARCH" = x86 ]; then
+    if [ "$INSTALL_JDK_MODE" = package ]; then
+      ERRORMSG="32-bit x86 installs use archive mode. Choose --install-mode archive."
+      return 1
+    fi
+    if [ -z "$INSTALL_JDK_DOWNLOAD_URL" ] && [ "$INSTALL_JDK_VERSION" != 11 ]; then
+      ERRORMSG="Automatic 32-bit x86 downloads are available for JDK 11 on Linux. If your application needs another version, supply a compatible archive with --download-url and --checksum-url."
+      return 1
+    fi
   fi
 
   if [ "$(id -u)" -ne 0 ]; then ISNONPRIVILEGEDINSTALL=true; fi
@@ -597,7 +621,7 @@ function resolve_install_mode() {
     ;;
   esac
 
-  if [ "$INSTALL_JDK_MODE" != archive ] && [ "$PLATFORM" = linux ] && ! $ISNONPRIVILEGEDINSTALL \
+  if [ "$INSTALL_JDK_MODE" != archive ] && [ "$PLATFORM" = linux ] && [ "$PLATFORMARCH" != x86 ] && ! $ISNONPRIVILEGEDINSTALL \
       && { [ "$INSTALL_JDK_ACTIVATE" = auto ] || [ "$INSTALL_JDK_ACTIVATE" = alternatives ]; } \
       && [ -z "$INSTALL_JDK_TARGET$INSTALL_JDK_ARCHITECTURE$INSTALL_JDK_DOWNLOAD_URL$INSTALL_JDK_CHECKSUM_URL" ] \
       && $INSTALL_JDK_VERIFY_CHECKSUM && ! $INSTALL_JDK_FORCE_INSTALL && is_command_available gpg; then
@@ -926,6 +950,17 @@ function install_archive() {
     ERRORMSG="The extracted archive does not contain an executable bin/java"
     return 1
   fi
+  if [ "$PLATFORM" = linux ]; then
+    local elf_header=()
+    read -r -a elf_header < <(od -An -tx1 -N5 "$JAVAHOME/bin/java")
+    # ELF magic followed by class 01 (32-bit) or 02 (64-bit).
+    case "$PLATFORMARCH:${elf_header[*]}" in
+      x86:'7f 45 4c 46 02'|x64:'7f 45 4c 46 01'|aarch64:'7f 45 4c 46 01')
+        ERRORMSG="The archive's Java executable does not match the bitness of this Linux userspace."
+        return 1
+      ;;
+    esac
+  fi
   "$JAVAHOME/bin/java" -version >/dev/null 2>&1 || { ERRORMSG="The staged Java executable did not run"; return 1; }
 
   destination="$INSTALL_JDK_TARGET/$ARCHIVETOPDIR"
@@ -969,9 +1004,6 @@ function install_archive() {
     JAVAHOME="$destination/Contents/Home"
   else
     JAVAHOME="$destination"
-  fi
-  if [ "$PLATFORM" = linux ] || $ISNONPRIVILEGEDINSTALL; then
-    ln -sfn "$destination" "$INSTALL_JDK_TARGET/jdk" || { ERRORMSG="Could not update $INSTALL_JDK_TARGET/jdk"; return 1; }
   fi
 }
 
@@ -1184,6 +1216,13 @@ function main() {
   section "Install OpenJDK $INSTALL_JDK_VERSION"
   install_archive || { error "$ERRORMSG"; return 1; }
   test_installation || { rollback_installation; error "$ERRORMSG"; return 1; }
+  if [ -n "$ACTIVATEDDESTINATION" ] && { [ "$PLATFORM" = linux ] || $ISNONPRIVILEGEDINSTALL; }; then
+    ln -sfn "$ACTIVATEDDESTINATION" "$INSTALL_JDK_TARGET/jdk" || {
+      rollback_installation
+      error "Could not update $INSTALL_JDK_TARGET/jdk"
+      return 1
+    }
+  fi
   configure_java_activation || { rollback_installation; error "$ERRORMSG"; return 1; }
   success "OpenJDK $INSTALL_JDK_VERSION is installed at $JAVAHOME"
   report_java_selection

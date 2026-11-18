@@ -1,0 +1,29 @@
+name: Installer checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bash syntax and ShellCheck
+        run: |
+          bash -n install-jdk.sh
+          shellcheck --severity warning install-jdk.sh
+      - name: Preview an archive install
+        run: |
+          plan=$(bash ./install-jdk.sh --jdk-version 21 --install-mode archive --dry-run --output json)
+          jq --exit-status --slurp 'any(.[]; .type == "plan" and .javaVersion == 21 and .installMode == "archive" and .verifyChecksum == true)' <<< "$plan"
+      - name: Reject 32-bit JDKs on 64-bit Linux
+        run: |
+          if result=$(bash ./install-jdk.sh --jdk-version 11 --architecture x86 --dry-run 2>&1); then
+            printf '%s\n' "$result"
+            exit 1
+          fi
+          grep --fixed-strings 'The x86 JDK requires a 32-bit x86 Linux userspace.' <<< "$result"
