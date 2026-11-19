@@ -16,6 +16,8 @@ jobs:
         run: |
           bash -n install-jdk.sh
           shellcheck --severity warning install-jdk.sh
+      - name: Check unattended APT policy handling
+        run: python3 tests/apt-auto-updates.test.py
       - name: Preview an archive install
         run: |
           plan=$(bash ./install-jdk.sh --jdk-version 21 --install-mode archive --dry-run --output json)

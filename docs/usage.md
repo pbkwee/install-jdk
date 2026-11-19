@@ -4,6 +4,22 @@ Run `bash ./install-jdk.sh --help` for the current list of options and environme
 settings. Pass `--jdk-version` explicitly in automation so the installer chooses
 the major version your application expects.
 
+## Download and run
+
+The [README](../README.md#get-started) shows how to download a copy with curl
+or wget so you can review it before running it.
+
+Preview directly with wget and Bash.
+
+```bash
+(
+  set -o pipefail
+  wget --output-document=- \
+    https://raw.githubusercontent.com/pbkwee/install-jdk/main/install-jdk.sh |
+    bash -s -- --jdk-version 27 --dry-run
+)
+```
+
 ## Versions and platforms
 
 The script offers automatic Corretto downloads for JDK 8, 11, 17, 21, 25, and 27.
@@ -112,8 +128,8 @@ the checks after adjusting the relevant profile or service setting.
 ## Update an existing installation
 
 - **Package** — update through APT or DNF/YUM using your normal update policy.
-  If you use scheduled or unattended updates, check that your policy includes
-  Corretto's repository.
+  The Corretto repository supplies updates for the installed Java major.
+  See [unattended package updates](#unattended-package-updates).
 - **Archive** — rerun the installer with the same major, install target, and
   activation choice. If the new build uses the same directory name, the
   installer keeps the existing JDK by default. Use `--prompt` to confirm an
@@ -121,6 +137,37 @@ the checks after adjusting the relevant profile or service setting.
 - **Running applications** — restart affected services after an update. Verify the
   active JDK using the service's configured path, which may differ from the
   shell's `java`.
+
+### Unattended package updates
+
+An APT install adds Corretto to the host's unattended update policy by default
+when `unattended-upgrade` is installed and APT has an enabled unattended upgrade
+interval. This also applies when `--install-mode auto` selects APT. Archive and
+RPM installs ignore `--apt-auto-updates`.
+
+The installer writes a separate rule in
+`/etc/apt/apt.conf.d/60-install-jdk-corretto`. Existing timers, origin rules, and
+reboot settings keep their current configuration. The rule allows same-major
+Corretto updates, including bug fixes.
+
+Use `--apt-auto-updates off` or `INSTALL_JDK_APT_AUTO_UPDATES=off` to opt out.
+For APT installs, this removes the installer's rule if it still matches the
+generated file. Pass the option on later runs to retain the opt-out. Custom
+rules are managed by the operator. If you enable unattended APT upgrades
+after installing Java, rerun the package install to add the rule.
+Use `sudo unattended-upgrade --dry-run --debug` to check package eligibility.
+
+On RPM systems, an existing DNF job that installs all eligible updates covers
+Corretto. The upstream Corretto RPM feed can be skipped by security-only DNF
+updates because it lacks security advisory metadata. Keep the host policy and,
+if needed, schedule a separate upgrade of the installed Corretto packages.
+
+Check for running services that still need the updated Java with
+`sudo needrestart -r l` on APT systems or `sudo dnf needs-restarting --services`
+on RPM systems when available. Restart the affected service in its maintenance
+window and verify its Java version. The installer leaves service restarts to the
+host's package policy, which can restart affected services on Ubuntu 24.04.
+A Java update does not need a host reboot.
 
 ## Automate a preview
 

@@ -10,8 +10,7 @@ development environment.
 
 ## Get started
 
-Download the script, review it, and preview the install. Choose the Java major
-version your application or build requires. The examples use JDK 21.
+Download the script with either command.
 
 ```bash
 curl --fail --location --output install-jdk.sh \
@@ -19,11 +18,20 @@ curl --fail --location --output install-jdk.sh \
 ```
 
 ```bash
+wget --output-document=install-jdk.sh \
+  https://raw.githubusercontent.com/pbkwee/install-jdk/main/install-jdk.sh
+```
+
+Review the downloaded script, then preview the install. The examples use
+JDK 21. Replace it with the Java major your application requires.
+
+```bash
 bash ./install-jdk.sh --jdk-version 21 --dry-run
 ```
 
 The preview shows the install method and destination for the user running it.
 For a system-wide preview, use the same `sudo` and options you intend to install with.
+If you pipe the script to Bash, see [the stdin example](docs/usage.md#download-and-run).
 
 ### Provision a Linux server
 

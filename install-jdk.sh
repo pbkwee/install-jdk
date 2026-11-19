@@ -49,6 +49,7 @@ DEFAULT_JDK_VERSION=27
 INSTALL_JDK_VERSION=${INSTALL_JDK_VERSION-}
 INSTALL_JDK_MODE=${INSTALL_JDK_MODE:-auto}
 INSTALL_JDK_ACTIVATE=${INSTALL_JDK_ACTIVATE:-auto}
+INSTALL_JDK_APT_AUTO_UPDATES=${INSTALL_JDK_APT_AUTO_UPDATES:-auto}
 INSTALL_JDK_TARGET=${INSTALL_JDK_TARGET-}
 INSTALL_JDK_DOWNLOAD_URL=${INSTALL_JDK_DOWNLOAD_URL-}
 INSTALL_JDK_CHECKSUM_URL=${INSTALL_JDK_CHECKSUM_URL-}
@@ -191,6 +192,7 @@ Usage: $0 [options]
   --jdk-version MAJOR              JDK 8, 11, 17, 21, 25, or 27 (default: $DEFAULT_JDK_VERSION, or 11 on 32-bit x86 Linux)
   --early-access                   Allow an OpenJDK preview, such as Java 28
   --install-mode MODE              auto, package, or archive (default: auto)
+  --apt-auto-updates MODE          auto or off for unattended Corretto APT updates (default: auto)
   --activate MODE                  How the installed JDK becomes the Java you use
   --install-target PATH            Archive directory (default here: $target)
   --profile-shell SHELL            auto, bash, or zsh for --activate user-profile
@@ -236,6 +238,7 @@ Environment defaults (command-line options override them):
   INSTALL_JDK_CHECKSUM_URL, INSTALL_JDK_VERIFY_CHECKSUM, INSTALL_JDK_PERMIT_OBSOLETE
   INSTALL_JDK_FORCE_INSTALL, INSTALL_JDK_RUN_POST_INSTALL_TESTS, INSTALL_JDK_PROMPT
   INSTALL_JDK_DRY_RUN, INSTALL_JDK_QUIET, INSTALL_JDK_COLOR, INSTALL_JDK_OUTPUT
+  INSTALL_JDK_APT_AUTO_UPDATES
 
 Java in the current PATH: $detected
 
@@ -266,6 +269,10 @@ function parse_command_line() {
       --activate)
         shift; require_option_value "$@" || { ERRORMSG="$parameter requires an activation mode"; return 1; }
         INSTALL_JDK_ACTIVATE=$1
+      ;;
+      --apt-auto-updates)
+        shift; require_option_value "$@" || { ERRORMSG="$parameter requires auto or off"; return 1; }
+        INSTALL_JDK_APT_AUTO_UPDATES=$1
       ;;
       --install-target|--installtarget)
         shift; require_option_value "$@" || { ERRORMSG="$parameter requires a path"; return 1; }
@@ -474,6 +481,10 @@ function apply_defaults_and_validate() {
     auto|bash|zsh) ;;
     *) ERRORMSG="INSTALL_JDK_PROFILE_SHELL must be auto, bash, or zsh"; return 1 ;;
   esac
+  case "$INSTALL_JDK_APT_AUTO_UPDATES" in
+    auto|off) ;;
+    *) ERRORMSG="--apt-auto-updates must be auto or off"; return 1 ;;
+  esac
 
   PLATFORM=$(output_platform) || {
     ERRORMSG="Only Linux and macOS are currently supported"
@@ -679,6 +690,45 @@ function install_repo_file() {
   NEWREPOFILES+=("$destination")
 }
 
+function configure_corretto_apt_updates() {
+  local candidate="$DOWNLOADDIR/60-install-jdk-corretto" destination=/etc/apt/apt.conf.d/60-install-jdk-corretto
+  if [ "$INSTALL_JDK_APT_AUTO_UPDATES" = auto ]; then
+    is_command_available unattended-upgrade || return 0
+    # apt-config shell emits periodic='1' and unattended='1' (or 'always').
+    # APT runs periodic upgrades only when the unattended interval is enabled.
+    if ! apt-config shell periodic APT::Periodic::Enable unattended APT::Periodic::Unattended-Upgrade |
+      awk -F"'" '
+        BEGIN { active = 1 }
+        $1 == "periodic=" { active = tolower($2) ~ /^(1|yes|true|on)$/ }
+        $1 == "unattended=" { scheduled = ($2 == "always" || ($2 ~ /^[0-9]+$/ && $2 > 0)) }
+        END { exit !(active && scheduled) }
+      '; then
+      return 0
+    fi
+  fi
+
+  if ! cat > "$candidate" <<'APT'
+/* Managed by install-jdk */
+Unattended-Upgrade::Origins-Pattern {
+    "site=apt.corretto.aws,archive=stable,component=main";
+};
+APT
+  then
+    warn "Could not prepare the unattended Corretto APT rule."
+    return 0
+  fi
+  if [ "$INSTALL_JDK_APT_AUTO_UPDATES" = off ]; then
+    if [ ! -L "$destination" ] && cmp -s "$candidate" "$destination"; then
+      rm -f -- "$destination" || warn "Could not remove $destination."
+    fi
+  elif install_repo_file "$candidate" "$destination"; then
+    NEWREPOFILES=()
+    detail "Corretto is included in this host's unattended APT updates."
+  else
+    warn "Review $destination to include Corretto in unattended APT updates."
+  fi
+}
+
 function install_corretto_package() {
   local key_host=apt key="$DOWNLOADDIR/corretto.key" fingerprint files compiler
   [ "$PACKAGEMANAGER" = apt-get ] || key_host=yum
@@ -833,6 +883,9 @@ function print_install_plan() {
       echo "  Add or reuse the signed Corretto repository"
       echo "  Install under /usr/lib/jvm and use distro alternatives"
       echo "  Activation:           $INSTALL_JDK_ACTIVATE"
+      if [ "$PACKAGEMANAGER" = apt-get ]; then
+        echo "  APT unattended updates: $INSTALL_JDK_APT_AUTO_UPDATES"
+      fi
     fi
     return 0
   fi
@@ -1199,6 +1252,15 @@ function main() {
     test_installation || { error "$ERRORMSG"; return 1; }
     if [ "$INSTALL_JDK_ACTIVATE" = alternatives ]; then
       set_package_default || { error "$ERRORMSG"; return 1; }
+    fi
+    if [ "$PACKAGEMANAGER" = apt-get ]; then
+      configure_corretto_apt_updates
+      if is_command_available needrestart; then
+        detail "Check pending service restarts with 'sudo needrestart -r l'."
+      fi
+    else
+      detail "DNF security-only updates may skip Corretto. Check the host's update policy."
+      detail "Check pending service restarts with 'sudo dnf needs-restarting --services' if available."
     fi
     success "Corretto $INSTALL_JDK_VERSION is installed at $JAVAHOME"
     report_java_selection
