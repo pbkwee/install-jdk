@@ -105,11 +105,23 @@ If none exists, the installer creates `~/.bash_profile`. Zsh uses `~/.zprofile` 
 `~/.zshrc`. If your default login shell differs from the shell you want to set
 up, use `--profile-shell bash` or `--profile-shell zsh`.
 
-For services or applications that use separate Java settings, point their
-configuration at the installer-reported JDK directory. Use a version-specific
-directory when multiple services need different JDKs. The archive install's
-`jdk` symlink on Linux and personal installs can move to the last JDK
-activated in that target.
+Set `JAVA_HOME` in the service's own configuration to the installer-reported
+JDK directory. Use a version-specific directory or a symlink you manage for that
+service. The archive install's `jdk` symlink on Linux and personal installs can
+move to the last JDK activated in that target, including a different Java major.
+
+For Debian's SysV `tomcat7` package, set `JAVA_HOME` in `/etc/default/tomcat7`.
+Stop Tomcat and confirm its process has exited before switching its JDK. If
+`JRE_HOME` is also set in the service configuration, point it to the same JDK.
+Start Tomcat and check that its process uses the intended JDK. Replace `PID`
+below with the new process ID.
+
+```bash
+readlink /proc/PID/exe
+```
+
+Use the service's own setting to scope the change to Tomcat. Other services
+can use the distro's `/usr/lib/jvm/default-java` link.
 
 Run these commands to check the JDK in your current shell.
 
