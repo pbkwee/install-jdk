@@ -22,8 +22,10 @@ Preview directly with wget and Bash.
 
 ## Versions and platforms
 
-The script offers automatic Corretto downloads for JDK 8, 11, 17, 21, 25, and 27.
-It defaults to 27, or 11 on 32-bit x86 Linux, when no version is supplied.
+The script offers automatic Corretto downloads for JDK 8, 11, 17, 21, 25, and 27
+where Corretto publishes a compatible build. On 32-bit x86 Linux, JDK 8 uses
+Azul Zulu and JDK 11 uses Corretto.
+The installer defaults to 27, or 11 on 32-bit x86 Linux, when no version is supplied.
 For an existing application, specify the major it supports.
 
 | Install mode | Where it fits | Destination |
@@ -69,13 +71,22 @@ vendor's manual installation instructions.
 [Corretto build targets](https://github.com/corretto/corretto-11/blob/develop/CHANGELOG.md) ·
 [Debian 6 package history](https://sources.debian.org/src/eglibc/)
 
-If the application requires Java 8, keep that major version until you have tested
-a migration. Corretto 8 has no Linux x86 build. Choose a maintained 32-bit build
-from another vendor, such as Azul Zulu, and use its installation instructions.
-If the vendor provides an HTTPS tarball and a plain SHA-256 checksum file, you
-can pass them to the script with `--download-url` and `--checksum-url`.
-[Corretto 8 downloads](https://docs.aws.amazon.com/corretto/latest/corretto-8-ug/downloads-list.html) ·
+For an application on Java 8, preview the Zulu install with the same major.
+
+```bash
+bash ./install-jdk.sh --jdk-version 8 --dry-run
+```
+
+On 32-bit x86 Linux with glibc, this queries Azul for a current community JDK 8
+archive and uses the SHA-256 for that exact archive. The installer tests the
+Java executable before switching the active installation. Test the application
+with the new JDK before relying on it in production.
+[Azul Metadata API](https://docs.azul.com/core/install/metadata-api) ·
 [Azul supported platforms](https://docs.azul.com/core/supported-platforms.html)
+
+For a custom archive, specify `--download-url` and an HTTPS `--checksum-url`
+for the matching SHA-256 file. The installer also accepts an Azul package
+metadata URL for the checksum when it names the selected archive.
 
 ### Try an early-access JDK
 

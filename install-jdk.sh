@@ -46,6 +46,7 @@ set -o pipefail
 # WGET_OPTS=(--tries=2 --timeout=10 --quiet --header="User-Agent: banana")
 
 DEFAULT_JDK_VERSION=27
+AZUL_ZULU_PACKAGES=https://api.azul.com/metadata/v1/zulu/packages/
 INSTALL_JDK_VERSION=${INSTALL_JDK_VERSION-}
 INSTALL_JDK_MODE=${INSTALL_JDK_MODE:-auto}
 INSTALL_JDK_ACTIVATE=${INSTALL_JDK_ACTIVATE:-auto}
@@ -69,6 +70,7 @@ INSTALL_JDK_OUTPUT=${INSTALL_JDK_OUTPUT:-text}
 
 PLATFORM=
 PLATFORMARCH=
+ARCHIVE_VENDOR=OpenJDK
 ARCHIVEFILE=
 ARCHIVETOPDIR=
 JAVAHOME=
@@ -146,6 +148,8 @@ function escape_json() {
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
   value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
   printf '%s' "$value"
 }
 
@@ -218,7 +222,7 @@ Install modes:
   package         Use APT on Debian 12+ or Ubuntu 22+, or DNF/YUM on
                   AlmaLinux/Rocky/RHEL 8+ or CentOS Stream 9+.
   archive         Use a vendor archive. Rerun this installer for updates.
-                  Automatic Linux x86 (32-bit) downloads use Corretto 11.
+                  On 32-bit x86 Linux, use Azul Zulu for JDK 8 or Corretto for JDK 11.
 
 Activation modes:
   auto            Keep the distro's alternatives policy for packages.
@@ -498,11 +502,11 @@ function apply_defaults_and_validate() {
     *) ERRORMSG="INSTALL_JDK_ARCHITECTURE must be x64, aarch64, or x86"; return 1 ;;
   esac
   if [ "$PLATFORMARCH" = x86 ] && { [ "$PLATFORM" != linux ] || [ "$host_architecture" != x86 ]; }; then
-    ERRORMSG="The x86 JDK requires a 32-bit x86 Linux userspace."
+    ERRORMSG="Detected $PLATFORM-${host_architecture:-unknown} userspace. The x86 JDK requires a 32-bit x86 Linux userspace. Use an architecture that matches this host."
     return 1
   fi
   if [ "$PLATFORM" = linux ] && [ "$host_architecture" = x86 ] && [ "$PLATFORMARCH" != x86 ]; then
-    ERRORMSG="This 32-bit x86 Linux userspace requires a 32-bit JDK."
+    ERRORMSG="Detected 32-bit x86 Linux userspace. The requested $PLATFORMARCH JDK requires a 64-bit userspace. Use --architecture x86."
     return 1
   fi
   if [ "$PLATFORMARCH" = x86 ]; then DEFAULT_JDK_VERSION=11; fi
@@ -523,11 +527,11 @@ function apply_defaults_and_validate() {
 
   if [ "$PLATFORMARCH" = x86 ]; then
     if [ "$INSTALL_JDK_MODE" = package ]; then
-      ERRORMSG="32-bit x86 installs use archive mode. Choose --install-mode archive."
+      ERRORMSG="Package mode has no Corretto packages for 32-bit x86 Linux. Use --install-mode archive."
       return 1
     fi
-    if [ -z "$INSTALL_JDK_DOWNLOAD_URL" ] && [ "$INSTALL_JDK_VERSION" != 11 ]; then
-      ERRORMSG="Automatic 32-bit x86 downloads are available for JDK 11 on Linux. If your application needs another version, supply a compatible archive with --download-url and --checksum-url."
+    if [ -z "$INSTALL_JDK_DOWNLOAD_URL" ] && [ "$INSTALL_JDK_VERSION" != 8 ] && [ "$INSTALL_JDK_VERSION" != 11 ]; then
+      ERRORMSG="No automatic download is available for JDK $INSTALL_JDK_VERSION on 32-bit x86 Linux. For this major, supply a compatible archive with --download-url and --checksum-url. Automatic options are JDK 8 and 11."
       return 1
     fi
   fi
@@ -554,7 +558,7 @@ function apply_defaults_and_validate() {
       return 1
     }
     ALTERNATIVES=alternatives
-    [ "$PACKAGEMANAGER" != apt-get ] || ALTERNATIVES=update-alternatives
+    [ "$PACKAGEMANAGER" != apt-get ] || ALTERNATIVES='update-alternatives'
     is_command_available "$ALTERNATIVES" || {
       ERRORMSG="--activate alternatives requires $ALTERNATIVES"
       return 1
@@ -672,7 +676,18 @@ function resolve_install_mode() {
     if [ -n "$PACKAGEMANAGER" ] && [ ! -L /usr/java/jdk ]; then INSTALL_JDK_MODE=package; fi
   fi
   if [ "$INSTALL_JDK_MODE" = package ] && [ -z "$PACKAGEMANAGER" ]; then
-    ERRORMSG="Package mode needs root, supported Linux with APT or DNF/YUM and GnuPG, and no archive overrides. Profile activation uses archive mode."
+    if $ISNONPRIVILEGEDINSTALL; then
+      ERRORMSG="Package mode requires root. Run with sudo or use --install-mode archive."
+    elif [ "$PLATFORM" != linux ]; then
+      ERRORMSG="Package mode uses Linux repositories. On $PLATFORM, use --install-mode archive."
+    elif ! is_command_available gpg; then
+      ERRORMSG="gpg is required to verify the Corretto repository key. Install GnuPG or use --install-mode archive."
+    elif [ -n "$INSTALL_JDK_TARGET$INSTALL_JDK_ARCHITECTURE$INSTALL_JDK_DOWNLOAD_URL$INSTALL_JDK_CHECKSUM_URL" ] ||
+        [ "$INSTALL_JDK_ACTIVATE" = system-profile ] || $INSTALL_JDK_FORCE_INSTALL || ! $INSTALL_JDK_VERIFY_CHECKSUM; then
+      ERRORMSG="Archive-only settings are active. Use --install-mode archive or remove the archive overrides to use packages."
+    else
+      ERRORMSG="No supported package manager was found for this Linux release. Use --install-mode archive or check the supported releases in --help."
+    fi
     return 1
   fi
 }
@@ -725,18 +740,22 @@ APT
     NEWREPOFILES=()
     detail "Corretto is included in this host's unattended APT updates."
   else
-    warn "Review $destination to include Corretto in unattended APT updates."
+    warn "Could not add Corretto to unattended APT updates. Review $destination to allow updates from the Corretto repository."
   fi
 }
 
 function install_corretto_package() {
   local key_host=apt key="$DOWNLOADDIR/corretto.key" fingerprint files compiler
   [ "$PACKAGEMANAGER" = apt-get ] || key_host=yum
-  ERRORMSG="Could not verify the Corretto repository signing key"
+  ERRORMSG="Could not download the Corretto signing key from $key_host.corretto.aws. Check HTTPS access and retry."
   download_file "https://$key_host.corretto.aws/corretto.key" "$key" || return 1
+  ERRORMSG="gpg could not read the downloaded Corretto repository key."
   fingerprint=$(gpg --batch --homedir "$DOWNLOADDIR" --with-colons --show-keys "$key" |
     awk -F: '$1 == "pub" { primary=1 } $1 == "fpr" && primary { print $10; primary=0 }') || return 1
-  [ "$fingerprint" = 6DC3636DAE534049C8B94623A122542AB04F24E3 ] || return 1
+  [ "$fingerprint" = 6DC3636DAE534049C8B94623A122542AB04F24E3 ] || {
+    ERRORMSG="The Corretto repository key fingerprint differs from the expected value. Verify the key with Amazon before retrying."
+    return 1
+  }
 
   if [ "$PACKAGEMANAGER" = apt-get ]; then
     ERRORMSG="Could not prepare the Corretto APT repository"
@@ -744,10 +763,12 @@ function install_corretto_package() {
     printf '%s\n' 'deb [signed-by=/usr/share/keyrings/corretto-keyring.gpg] https://apt.corretto.aws stable main' > "$DOWNLOADDIR/corretto.list" || return 1
     install_repo_file "$DOWNLOADDIR/keyring.gpg" /usr/share/keyrings/corretto-keyring.gpg || return 1
     install_repo_file "$DOWNLOADDIR/corretto.list" /etc/apt/sources.list.d/corretto.list || return 1
-    ERRORMSG="APT could not refresh repositories or install $PACKAGENAME"
-    apt-get -o APT::Update::Error-Mode=any update >&2 &&
-      DEBIAN_FRONTEND=noninteractive apt-get install -y "$PACKAGENAME" >&2 || return 1
+    ERRORMSG="apt-get update failed. Fix the APT error above before installing $PACKAGENAME."
+    apt-get -o APT::Update::Error-Mode=any update >&2 || return 1
+    ERRORMSG="apt-get could not install $PACKAGENAME. Review the APT error above."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$PACKAGENAME" >&2 || return 1
     NEWREPOFILES=()
+    ERRORMSG="dpkg-query could not list the files installed by $PACKAGENAME."
     files=$(dpkg-query -L "$PACKAGENAME") || return 1
   else
     ERRORMSG="Could not prepare the Corretto RPM repository"
@@ -760,11 +781,13 @@ gpgkey=https://yum.corretto.aws/corretto.key
 gpgcheck=1
 REPO
     install_repo_file "$DOWNLOADDIR/corretto.repo" /etc/yum.repos.d/corretto.repo || return 1
-    ERRORMSG="$PACKAGEMANAGER could not refresh repositories or install $PACKAGENAME"
-    rpm --import "$key" >&2 &&
-      "$PACKAGEMANAGER" --refresh --best --setopt=AmazonCorretto.skip_if_unavailable=false \
-        --setopt="AmazonCorretto.gpgkey=file://$key" install -y "$PACKAGENAME" >&2 || return 1
+    ERRORMSG="rpm could not import the verified Corretto signing key. Review the RPM error above."
+    rpm --import "$key" >&2 || return 1
+    ERRORMSG="$PACKAGEMANAGER could not install $PACKAGENAME. Review the package manager error above."
+    "$PACKAGEMANAGER" --refresh --best --setopt=AmazonCorretto.skip_if_unavailable=false \
+      --setopt="AmazonCorretto.gpgkey=file://$key" install -y "$PACKAGENAME" >&2 || return 1
     NEWREPOFILES=()
+    ERRORMSG="rpm could not list the files installed by $PACKAGENAME."
     files=$(rpm -ql "$PACKAGENAME") || return 1
   fi
   # java may be owned by the JRE subpackage, while javac is owned by the JDK.
@@ -821,6 +844,50 @@ function output_openjdk_download_url() {
     sed -n '1p'
 }
 
+function output_azul_metadata_field() {
+  # For example, {"sha256_hash":"9363..."} produces 9363...
+  # Callers check the complete value and reject missing or multiple matches.
+  grep -Eo "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" | cut -d '"' -f 4
+}
+
+function resolve_zulu_8_x86_download() {
+  local libc packages package_id archive update
+  local filters='java_version=8&os=linux_glibc&arch=i686&archive_type=tar.gz&java_package_type=jdk'
+  filters+='&javafx_bundled=false&release_status=ga&availability_types=CA&release_type=PSU&latest=true&page_size=1'
+  local uuid_pattern='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+  local archive_pattern='^https://cdn\.azul\.com/zulu/bin/zulu8\.[0-9]+\.[0-9]+\.[0-9]+-ca-jdk8\.0\.([1-9][0-9]{1,5})-linux_i686\.tar\.gz$'
+  libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
+  case "$libc" in
+    'glibc '[0-9]*) ;;
+    *)
+      ERRORMSG="The 32-bit Azul Zulu 8 archive requires glibc. getconf GNU_LIBC_VERSION could not identify it. Supply an archive for this system with --download-url and --checksum-url."
+      return 1
+    ;;
+  esac
+  detail "Detected 32-bit x86 Linux. Corretto 8 has no build for this platform. Looking up the Azul Zulu 8 archive."
+  packages=$(download_stdout "$AZUL_ZULU_PACKAGES?$filters") || {
+    ERRORMSG="Could not query Azul's package metadata for 32-bit Zulu 8. Check HTTPS access to api.azul.com, then retry."
+    return 1
+  }
+  package_id=$(output_azul_metadata_field package_uuid <<< "$packages") || package_id=
+  archive=$(output_azul_metadata_field download_url <<< "$packages") || archive=
+  # A matching URL has the form zulu8.98.0.201-ca-jdk8.0.514-linux_i686.tar.gz.
+  if ! [[ "$package_id" =~ $uuid_pattern && "$archive" =~ $archive_pattern ]]; then
+    ERRORMSG="Azul's package metadata did not contain a usable 32-bit Zulu 8 JDK archive. Check the vendor's downloads or supply --download-url and --checksum-url."
+    return 1
+  fi
+  update=${BASH_REMATCH[1]}
+  # Azul's latest filter may include old builds. Require the November 2026
+  # security release or later if the feed stops listing a current x86 build.
+  if [ "$update" -lt 514 ]; then
+    ERRORMSG="Azul returned Zulu 8u$update for 32-bit x86 Linux. Automatic installation requires 8u514 or later. Check the vendor's downloads for an updated build."
+    return 1
+  fi
+  ARCHIVE_VENDOR="Azul Zulu"
+  INSTALL_JDK_DOWNLOAD_URL=$archive
+  INSTALL_JDK_CHECKSUM_URL=${INSTALL_JDK_CHECKSUM_URL:-$AZUL_ZULU_PACKAGES$package_id}
+}
+
 function resolve_download() {
   if [ -z "$INSTALL_JDK_DOWNLOAD_URL" ]; then
     if [ "$INSTALL_JDK_VERSION" = 28 ]; then
@@ -829,6 +896,8 @@ function resolve_download() {
         ERRORMSG="Could not locate OpenJDK $INSTALL_JDK_VERSION for $PLATFORM-$PLATFORMARCH"
         return 1
       }
+    elif [ "$INSTALL_JDK_VERSION" = 8 ] && [ "$PLATFORMARCH" = x86 ]; then
+      resolve_zulu_8_x86_download || return 1
     else
       local os="$PLATFORM" filename libc major minor minimum=12
       if [ "$PLATFORM" = linux ]; then
@@ -837,10 +906,11 @@ function resolve_download() {
         libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
         IFS='. ' read -r _ major minor _ <<< "$libc"
         if [ -z "$major" ] || [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "${minor:-0}" -lt "$minimum" ]; }; then
-          ERRORMSG="Corretto $INSTALL_JDK_VERSION on $PLATFORMARCH requires glibc 2.$minimum or newer. Upgrade the OS or supply a compatible vendor build with --download-url."
+          ERRORMSG="Detected ${libc:-no glibc version}. Corretto $INSTALL_JDK_VERSION on $PLATFORMARCH requires glibc 2.$minimum or newer. Upgrade the OS or supply a compatible archive with --download-url and --checksum-url."
           return 1
         fi
       fi
+      ARCHIVE_VENDOR="Amazon Corretto"
       filename="amazon-corretto-$INSTALL_JDK_VERSION-$PLATFORMARCH-$os-jdk.tar.gz"
       INSTALL_JDK_DOWNLOAD_URL="https://corretto.aws/downloads/latest/$filename"
       INSTALL_JDK_CHECKSUM_URL=${INSTALL_JDK_CHECKSUM_URL:-https://corretto.aws/downloads/latest_sha256/$filename}
@@ -930,23 +1000,39 @@ function verify_archive_checksum() {
   # codex:refactor Downloads were previously trusted when a file merely existed.
   # SHA-256 verification is now required unless the caller explicitly disables it.
   local checksum_file="$DOWNLOADDIR/archive.sha256"
-  local expected actual
-  $INSTALL_JDK_VERIFY_CHECKSUM || { warn "Checksum verification was explicitly disabled"; return 0; }
+  local expected actual metadata_archive
+  $INSTALL_JDK_VERIFY_CHECKSUM || { warn "Skipped archive SHA-256 verification because --verify-checksum is false."; return 0; }
   # OpenJDK's .sha256 response is one bare hexadecimal field, for example:
   # 2da09e9db53e5c4f9eeec045f49e7d8fbcd8e4153edbf0c269f520ff82fd4198
   download_file "$INSTALL_JDK_CHECKSUM_URL" "$checksum_file" || {
-    ERRORMSG="Could not download required checksum from $INSTALL_JDK_CHECKSUM_URL; use --verify-checksum false only if the archive is independently trusted"
+    ERRORMSG="Could not download the SHA-256 checksum from $INSTALL_JDK_CHECKSUM_URL. Check HTTPS access or provide a valid --checksum-url."
     return 1
   }
-  expected=$(awk 'NR == 1 {print $1}' "$checksum_file")
+  case "$INSTALL_JDK_CHECKSUM_URL" in
+    "$AZUL_ZULU_PACKAGES"*)
+      metadata_archive=$(output_azul_metadata_field download_url < "$checksum_file") || metadata_archive=
+      if [ "$metadata_archive" != "$INSTALL_JDK_DOWNLOAD_URL" ]; then
+        ERRORMSG="Azul's checksum metadata does not identify the selected archive. Check the archive and checksum URLs."
+        return 1
+      fi
+      expected=$(output_azul_metadata_field sha256_hash < "$checksum_file") || expected=
+    ;;
+    *) expected=$(awk 'NR == 1 {print $1}' "$checksum_file") ;;
+  esac
+  if ! [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    ERRORMSG="No valid SHA-256 checksum was found at $INSTALL_JDK_CHECKSUM_URL. Check the URL for the selected archive."
+    return 1
+  fi
   actual=$(output_file_sha256 "$ARCHIVEFILE") || {
     ERRORMSG="sha256sum, shasum, or openssl is required for checksum verification"
     return 1
   }
-  if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
-    ERRORMSG="SHA-256 checksum verification failed"
+  expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
+  if [ "$actual" != "$expected" ]; then
+    ERRORMSG="The SHA-256 of ${ARCHIVEFILE##*/} does not match the expected checksum. Retry the download and check that the checksum belongs to this archive."
     return 1
   fi
+  detail "Verified the SHA-256 checksum for ${ARCHIVEFILE##*/}."
 }
 
 function output_archive_top_directory() {
@@ -979,9 +1065,12 @@ function install_archive() {
   # codex:refactor Archives were previously expanded directly into INSTALL_JDK_TARGET
   # and --force deleted the existing directory. Extract and validate in a staging
   # directory, and move an existing installation to a timestamped backup instead.
-  local destination staged_jdk backup_stamp
+  local destination staged_jdk backup_stamp launcher_output
   mkdir -p "$INSTALL_JDK_TARGET" || { ERRORMSG="Could not create $INSTALL_JDK_TARGET"; return 1; }
-  STAGEDIR=$(mktemp -d "$INSTALL_JDK_TARGET/.install-jdk.XXXXXX") || return 1
+  STAGEDIR=$(mktemp -d "$INSTALL_JDK_TARGET/.install-jdk.XXXXXX") || {
+    ERRORMSG="Could not create an extraction directory under $INSTALL_JDK_TARGET. Check its permissions and free space."
+    return 1
+  }
   tar -xzf "$ARCHIVEFILE" --directory "$STAGEDIR" || { ERRORMSG="Could not extract the JDK archive"; return 1; }
 
   #codex:deprecated Older private archives could be .bz files or executable .bin
@@ -1014,7 +1103,11 @@ function install_archive() {
       ;;
     esac
   fi
-  "$JAVAHOME/bin/java" -version >/dev/null 2>&1 || { ERRORMSG="The staged Java executable did not run"; return 1; }
+  launcher_output=$("$JAVAHOME/bin/java" -version 2>&1) || {
+    ERRORMSG="$JAVAHOME/bin/java -version failed on $PLATFORM-$PLATFORMARCH. Check the archive's runtime requirements."
+    [ -z "$launcher_output" ] || ERRORMSG="$ERRORMSG Java reported: ${launcher_output%%$'\n'*}"
+    return 1
+  }
 
   destination="$INSTALL_JDK_TARGET/$ARCHIVETOPDIR"
   if [ -e "$destination" ]; then
@@ -1121,9 +1214,9 @@ function report_java_selection() {
     detail "Java on this installer's PATH selects the installed JDK ($selected)."
   elif [ -n "$selected" ]; then
     resolved=$(readlink -f "$selected" 2>/dev/null) || resolved=$selected
-    warn "This installer's PATH finds $resolved instead of $installed."
+    warn "The install shell resolves java to $resolved. The newly installed executable is $installed."
   else
-    warn "This installer's PATH has no java. The new executable is $installed."
+    warn "The install shell could not find java on PATH. The new executable is $installed."
   fi
   if [ -n "${JAVA_HOME:-}" ] && [[ ! "$JAVA_HOME/bin/java" -ef "$installed" && ! "$JAVA_HOME/bin/java" -ef "$JAVAHOME/jre/bin/java" ]]; then
     warn "The inherited JAVA_HOME=$JAVA_HOME points elsewhere or has no executable java."
@@ -1204,7 +1297,10 @@ function print_archive_instructions() {
 
 function test_installation() {
   local reported_version
-  $INSTALL_JDK_RUN_POST_INSTALL_TESTS || return 0
+  $INSTALL_JDK_RUN_POST_INSTALL_TESTS || {
+    detail "Skipped post-install java and javac checks because --run-post-install-tests is false."
+    return 0
+  }
   [ -x "$JAVAHOME/bin/java" ] || { ERRORMSG="$JAVAHOME/bin/java is not executable"; return 1; }
   [ -x "$JAVAHOME/bin/javac" ] || { ERRORMSG="$JAVAHOME/bin/javac is not executable"; return 1; }
   # Modern Java: openjdk version "26.0.2" 2026-07-21
@@ -1215,7 +1311,10 @@ function test_installation() {
     ERRORMSG="Installed Java does not report requested major version $INSTALL_JDK_VERSION: $reported_version"
     return 1
   }
-  "$JAVAHOME/bin/javac" -version >/dev/null 2>&1 || { ERRORMSG="javac did not run successfully"; return 1; }
+  "$JAVAHOME/bin/javac" -version >/dev/null 2>&1 || {
+    ERRORMSG="$JAVAHOME/bin/javac -version failed. Run it directly to see the JVM error."
+    return 1
+  }
   detail "Validated java and javac under $JAVAHOME"
 }
 
@@ -1233,7 +1332,7 @@ function main() {
   preflight_system_profile || { error "$ERRORMSG"; return 1; }
   explain_existing_archive
   if [ "$INSTALL_JDK_MODE" = archive ]; then
-    section "Resolve Java download"
+    section "Resolve the JDK $INSTALL_JDK_VERSION archive for $PLATFORM-$PLATFORMARCH"
     resolve_download || { error "$ERRORMSG"; return 1; }
   fi
   if $INSTALL_JDK_DRY_RUN; then
@@ -1243,7 +1342,10 @@ function main() {
 
   # codex:refactor The previous installer downloaded or reused archives in the
   # caller's current directory. Each run now uses an isolated temporary download.
-  DOWNLOADDIR=$(mktemp -d "${TMPDIR:-/tmp}/install-jdk.XXXXXX") || return 1
+  DOWNLOADDIR=$(mktemp -d "${TMPDIR:-/tmp}/install-jdk.XXXXXX") || {
+    error "Could not create a download directory in ${TMPDIR:-/tmp}. Check its permissions and free space."
+    return 1
+  }
   trap cleanup EXIT
   trap 'exit 1' HUP INT TERM
   if [ "$INSTALL_JDK_MODE" = package ]; then
@@ -1267,15 +1369,15 @@ function main() {
     detail "For each service, set JAVA_HOME=$JAVAHOME in its service configuration."
     return 0
   fi
-  section "Download and verify OpenJDK $INSTALL_JDK_VERSION"
+  section "Download and verify $ARCHIVE_VENDOR $INSTALL_JDK_VERSION"
   ARCHIVEFILE="$DOWNLOADDIR/$(basename "$INSTALL_JDK_DOWNLOAD_URL")"
   detail "Downloading $INSTALL_JDK_DOWNLOAD_URL"
   download_file "$INSTALL_JDK_DOWNLOAD_URL" "$ARCHIVEFILE" || { error "Failed downloading $INSTALL_JDK_DOWNLOAD_URL"; return 1; }
-  [ -s "$ARCHIVEFILE" ] || { error "The downloaded archive is empty"; return 1; }
+  [ -s "$ARCHIVEFILE" ] || { error "The archive from $INSTALL_JDK_DOWNLOAD_URL is empty. Check the URL and retry."; return 1; }
   verify_archive_checksum || { error "$ERRORMSG"; return 1; }
   validate_archive_paths || { error "$ERRORMSG"; return 1; }
 
-  section "Install OpenJDK $INSTALL_JDK_VERSION"
+  section "Install $ARCHIVE_VENDOR $INSTALL_JDK_VERSION"
   install_archive || { error "$ERRORMSG"; return 1; }
   test_installation || { rollback_installation; error "$ERRORMSG"; return 1; }
   if [ -n "$ACTIVATEDDESTINATION" ] && { [ "$PLATFORM" = linux ] || $ISNONPRIVILEGEDINSTALL; }; then
@@ -1286,10 +1388,13 @@ function main() {
     }
   fi
   configure_java_activation || { rollback_installation; error "$ERRORMSG"; return 1; }
-  success "OpenJDK $INSTALL_JDK_VERSION is installed at $JAVAHOME"
+  success "$ARCHIVE_VENDOR $INSTALL_JDK_VERSION is installed at $JAVAHOME"
   report_java_selection
   print_archive_instructions
-  detail "For each service, set JAVA_HOME=$JAVAHOME in its service configuration."
+  if [ -L "$INSTALL_JDK_TARGET/jdk" ] && [[ "$INSTALL_JDK_TARGET/jdk/bin/java" -ef "$JAVAHOME/bin/java" ]]; then
+    detail "The $INSTALL_JDK_TARGET/jdk link selects this JDK now. Restart services that use the link to load the new Java."
+  fi
+  detail "If a service uses a different Java path, set JAVA_HOME=$JAVAHOME in its configuration before restarting it."
 }
 
 #codex:deprecated The old script guessed whether it was launched from an

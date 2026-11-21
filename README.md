@@ -4,9 +4,9 @@
 
 Install the Java Development Kit (JDK) your application needs on Linux or macOS.
 One Bash script installs Amazon Corretto through signed Linux packages or a
-SHA-256-verified archive. It can also install OpenJDK early-access builds. Run
-it as an administrator to provision a server or as your own user to set up a
-development environment.
+SHA-256-verified archive. It also supports Azul Zulu for Java 8 on 32-bit x86
+Linux and OpenJDK early-access builds. Run it as an administrator to provision
+a server or as your own user to set up a development environment.
 
 ## Get started
 
